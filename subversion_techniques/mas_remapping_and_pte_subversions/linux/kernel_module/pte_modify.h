@@ -38,10 +38,16 @@ struct va_pte_entry_ll *lookup_ll_va_pte(VIRT_ADDR);
 /* Declaration of functions to invalidate pages */
 int invalidate_restore_pte(int, VIRT_ADDR, int);
 void pte_invalidate_handler(char *, int, int);
+void pte_invalidate_anon_handler(unsigned long long, int, int);
+
 
 /* Declaration of functions to remap pages */
-void remap_pte(struct vm_area_struct *, struct vm_area_struct *, int);
-void reset_pte(struct vm_area_struct *, int);
+void remap_pte(struct vm_area_struct *, struct vm_area_struct *, int, MemoryMode);
+void reset_pte(struct vm_area_struct *, int, MemoryMode );
 void pte_remap_handler(char *, int, int);
+void pte_remap_handler_anon(unsigned long long, int, int, MemoryMode);
+void mas_remapping_handler(unsigned long long, int, int);
+struct vm_area_struct *get_fitting_benign_vma(struct vm_area_struct *, int);
+struct vm_area_struct *find_vma_with_size(unsigned long long);
 
 #endif //MATHESIS_PTE_HIDE_H

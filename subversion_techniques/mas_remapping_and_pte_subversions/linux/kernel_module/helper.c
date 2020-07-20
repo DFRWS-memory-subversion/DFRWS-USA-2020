@@ -1,6 +1,8 @@
 /* helper.c -- general helper functions
  *
  * Copyright (C) 2019 Patrick Reichenberger
+ * Additional Authors:
+ * Frank Block, ERNW Research GmbH <fblock@ernw.de>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -61,6 +63,33 @@ struct vm_area_struct *find_vma_mmap(int pid) {
     }
 }
 
+/** find_vma_with_start_address - searches VMA for the given start address and PID
+ *  @vm_start: VMA->vm_start to search for
+ *  @pid: PID
+ *
+ *  Traverses the linked list of VMAs and returns pointer to vm_area_struct if path and rights match
+ */
+struct vm_area_struct *find_vma_with_start_address(unsigned long long vm_start, int pid) {
+
+    struct mm_struct *mm = find_mm(pid);
+    if(!down_read_trylock(&mm->mmap_sem))
+        return 0;
+
+    struct vm_area_struct *vma = find_vma_mmap(pid);
+
+    if (vma){
+        while (vma) {
+            if(vma->vm_start == vm_start) {
+                up_read(&mm->mmap_sem);
+                return vma;
+            }
+            vma = vma->vm_next;
+        }
+    }
+    up_read(&mm->mmap_sem);
+    return 0;
+}
+
 /** find_vma_path_rights - searches VMA with specified path and rights for PID
  *  @path: path of the VMA
  *  @rights: rights of the VMA
@@ -68,12 +97,22 @@ struct vm_area_struct *find_vma_mmap(int pid) {
  *
  *  Traverses the linked list of VMAs and returns pointer to vm_area_struct if path and rights match
  */
-struct vm_area_struct *find_vma_path_rights(const char *path, int rights, int pid) {
+struct vm_area_struct *find_vma_path_rights(struct vm_area_struct *start_vma, const char *path, int rights, int pid) {
+
     struct mm_struct *mm = find_mm(pid);
+    if(!down_read_trylock(&mm->mmap_sem))
+        return 0;
+
+    struct vm_area_struct *vma = start_vma;
 
     /* Problems occur in this function sometimes, if the process is terminated while the data is hidden in automatic mode. */
-    if(down_read_trylock(&mm->mmap_sem)) {
-        struct vm_area_struct *vma = find_vma_mmap(pid);
+    if (!vma){
+        vma = find_vma_mmap(pid);
+    }
+    else{
+        vma = vma->vm_next;
+    }
+    if (vma){
         while (vma) {
             if(vma->vm_file && vma->vm_file->f_path.dentry && !strcmp(vma->vm_file->f_path.dentry->d_name.name, path)
                 && vma->vm_flags && ((vma->vm_flags & (VM_READ | VM_WRITE | VM_EXEC)) == rights)) {
@@ -82,8 +121,8 @@ struct vm_area_struct *find_vma_path_rights(const char *path, int rights, int pi
             }
             vma = vma->vm_next;
         }
-        up_read(&mm->mmap_sem);
     }
+    up_read(&mm->mmap_sem);
     return 0;
 }
 
@@ -97,6 +136,9 @@ struct vm_area_struct *find_vma_path_rights(const char *path, int rights, int pi
  *  4. The page must be in the page cache
  */
 struct page *own_delete_from_page_cache(PTE *pte) {
+#ifndef DELETE_PAGE_CACHE
+    return NULL;
+#endif
     struct page *page;
     /* Obtains a pointer to the struct page. */
     page = get_pte_page(pte);
@@ -175,6 +217,20 @@ void modify_rss_stat_count(struct mm_struct *mm, int vm_flags, int swap, int mod
     }
 }
 
+
+void modify_rss_stat_countpteremap_anon(struct mm_struct *mm, int mode, MemoryMode mem_mode) {
+    int index = MM_ANONPAGES;
+    if (mem_mode == ANON_SHARED_MEMORY)
+        index = MM_SHMEMPAGES;
+
+    if(mode == HIDE) {
+        atomic_long_dec(&mm->rss_stat.count[index]);
+        atomic_long_inc(&mm->rss_stat.count[MM_FILEPAGES]);
+    } else if(mode == REVEAL) {
+        atomic_long_inc(&mm->rss_stat.count[index]);
+        atomic_long_dec(&mm->rss_stat.count[MM_FILEPAGES]);
+    }
+}
 
 /** modify_rss_stat_countpteremap - adjust the resident set size (RSS) counter for PTE remapping technique
  *  @mm: memory descriptor of rss

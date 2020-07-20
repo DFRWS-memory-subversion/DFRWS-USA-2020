@@ -1,6 +1,8 @@
 /* helper.c -- general helper functions
  *
  * Copyright (C) 2019 Patrick Reichenberger
+ * Additional Authors:
+ * Frank Block, ERNW Research GmbH <fblock@ernw.de>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -21,11 +23,19 @@
 
 #define NETLINK_USER 31
 #include <linux/module.h>
+#include "vma_modify.h"
 /* Activates manual mode if defined, automatic mode if not */
-//#define MANUAL_MODE
+#define MANUAL_MODE
+
+/* Activates deletion of page cache, which can prevent
+ * subversion detection in some cases.
+ * The page cache deletion is also required for PTE erasure
+ * to work properly with shared memory and in the context of live analysis.
+ */
+//#define DELETE_PAGE_CACHE
 
 /* Activates hiding with zombie rootkit */
-#define ZOMBIE_HIDE
+//#define ZOMBIE_HIDE
 
 enum {
     HIDE,

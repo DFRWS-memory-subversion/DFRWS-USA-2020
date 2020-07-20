@@ -246,6 +246,7 @@ PTE_STATUS remap_page(VIRT_ADDR vaddr, PHYS_ADDR target, int pid) {
     pte->page_frame = target >> 12;
     // Flush the old pte from the TLBs in the system.
     flush_tlb_page(vaddr.pointer);
+    log_print(LOG_INFO, "Flushing TLB for %#016llx", vaddr.pointer);
     // Flush L1/L2/L3 caches
     flush_caches();
 

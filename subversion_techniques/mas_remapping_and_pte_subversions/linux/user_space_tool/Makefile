@@ -8,4 +8,4 @@ all:
 	$(CC) xor-encryptor.c -o xor-encryptor
 	./xor-encryptor mallib.so xor-mallib.so
 	./xor-encryptor benignlib.so xor-benignlib.so
-	$(CC) norm-proc.c -ldl -o norm-process -lcurl
+	$(CC) norm-proc.c -ldl -o norm-process -lcurl -pthread -lrt

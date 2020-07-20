@@ -20,6 +20,14 @@
 #define MATHESIS_HELPER_H
 #include "pte_helper.h"
 
+
+enum MemoryMode {
+	SHARED_LIB, /* Using a shared library for malicious tasks */
+	ANON_PRIVATE_MEMORY,	/* Using anonymous memory instead of a shared library */
+	ANON_SHARED_MEMORY	/* Using anonymous memory instead of a shared library */
+};
+typedef enum MemoryMode MemoryMode;
+
 /* Helps to track the nr_ptes */
 struct nr_ptes_vma_track {
     int nr_ptes;
@@ -28,10 +36,12 @@ struct nr_ptes_vma_track {
 
 struct mm_struct *find_mm(int);
 struct vm_area_struct *find_vma_mmap(int);
-struct vm_area_struct *find_vma_path_rights(const char *, int, int);
+struct vm_area_struct *find_vma_path_rights(struct vm_area_struct *, const char *, int, int);
+struct vm_area_struct *find_vma_with_start_address(unsigned long long, int);
 struct page *own_delete_from_page_cache(PTE *);
 void modify_rss_stat_count(struct mm_struct *, int, int, int);
 void modify_rss_stat_countpteremap(struct mm_struct *, int, int);
+void modify_rss_stat_countpteremap_anon(struct mm_struct *, int, MemoryMode);
 struct nr_ptes_vma_track adjust_nr_ptes(struct vm_area_struct *, unsigned long);
 unsigned long get_section_address(char *);
 

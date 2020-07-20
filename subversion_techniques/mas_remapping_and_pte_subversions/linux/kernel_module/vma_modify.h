@@ -1,6 +1,8 @@
 /* vma_modify.h -- deleting the VMAs and modifying the limits of the VMAs
  *
  * Copyright (C) 2019 Patrick Reichenberger
+ * Additional Authors:
+ * Frank Block, ERNW Research GmbH <fblock@ernw.de>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,7 +22,6 @@
 #define MATHESIS_VMA_MODIFY_H_H
 #include "pte_helper.h"
 
-
 /* Linked list */
 struct vma_ident {
     const char *filepath;
@@ -30,15 +31,14 @@ struct vma_ident {
 struct vma_backup_entry_ll {
     struct vma_ident vma_id;
     struct vm_area_struct *vma;
-    unsigned long int vm_start;
-    unsigned long int vm_end;
+    unsigned long long vm_start;
+    unsigned long long vm_end;
     struct list_head vma_bck_list;
 };
 
 struct vma_backup_entry_ll *create_vma_backup_entry(const char *, int, struct vm_area_struct *, pte_uint64, pte_uint64);
 struct vma_backup_entry_ll *lookup_ll_vma_backup(const char *, int);
 int insert_ll_vmabound_backup(const char *, int, struct vm_area_struct *, pte_uint64, pte_uint64);
-
 
 int delete_vma(struct vm_area_struct *, int);
 struct vm_area_struct *restore_vma(char *, int, int);

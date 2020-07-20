@@ -1,6 +1,8 @@
 /* vma_modify.c -- deleting the VMAs and modifying the limits of the VMAs
  *
  * Copyright (C) 2019 Patrick Reichenberger
+ * Additional Authors:
+ * Frank Block, ERNW Research GmbH <fblock@ernw.de>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -29,6 +31,8 @@ static int vma_rights[] = {(VM_READ | VM_EXEC), 0, VM_READ, (VM_READ | VM_WRITE)
 /* Initialization of an empty linked list to store the hidden entries */
 LIST_HEAD(vma_backup_ll);
 
+struct vma_backup_entry_ll *mas_remap_mal_vma;
+
 struct vma_backup_entry_ll *create_vma_backup_entry(const char *filepath, int access_rights, struct vm_area_struct *vma, pte_uint64 vm_start, pte_uint64 vm_end) {
     struct vma_backup_entry_ll *ptr = kmalloc(sizeof(struct vma_backup_entry_ll), GFP_NOWAIT);
     if(ptr) {
@@ -55,18 +59,19 @@ int insert_ll_vma_backup(const char *filepath, int access_rights, struct vm_area
     /* Check if the VMA with this file path and the access rights is already in the linked list */
     int found_and_changed = 0;
     struct vma_backup_entry_ll *vmabe_ptr = NULL;
+    bool already_backuped = false;
     list_for_each_entry(vmabe_ptr, &vma_backup_ll, vma_bck_list) {
         if(!strcmp(vmabe_ptr->vma_id.filepath, filepath) && vmabe_ptr->vma_id.access_rights == access_rights) {
-            vmabe_ptr->vma = vma;
-            vmabe_ptr->vm_start = vm_start;
-            vmabe_ptr->vm_end = vm_end;
             found_and_changed = 1;
         }
+        if (vma == vmabe_ptr->vma)
+            already_backuped = true;
     }
 
     /* If it is not in the linked list, then allocate memory and add into the linked list */
-    if(!found_and_changed) {
-        struct vma_backup_entry_ll *insert = create_vma_backup_entry(filepath, access_rights, vma, vm_start, vm_end);
+    if(!already_backuped) {
+        filepath = vma->vm_file->f_path.dentry->d_name.name;
+        struct vma_backup_entry_ll *insert = create_vma_backup_entry(filepath, access_rights, vma, vma->vm_start, vma->vm_end);
         if(!insert) {
             return -1;
         }
@@ -74,6 +79,7 @@ int insert_ll_vma_backup(const char *filepath, int access_rights, struct vm_area
     }
     return 0;
 }
+
 
 /* Lookup a vma_backup_entry in the linked list */
 struct vma_backup_entry_ll *lookup_ll_vma_backup(const char *filepath, int access_rights) {
@@ -300,7 +306,7 @@ void vma_delete_handler(char *mal_lib_path, int mode, int pid) {
         for (int i = 0; i < sizeof(vma_rights) / sizeof(int); i++) {
             struct vm_area_struct *mal_vma;
             /* Find pointer to the VMA to be deleted */
-            mal_vma = find_vma_path_rights(mal_lib_path, vma_rights[i], pid);
+            mal_vma = find_vma_path_rights(0, mal_lib_path, vma_rights[i], pid);
             if(mal_vma) {
                 status = delete_vma(mal_vma, pid);
             } else {
@@ -448,6 +454,7 @@ int reset_vma_bounds(struct vm_area_struct *mal_vma) {
     }
 }
 
+
 /** vma_modify_handler - handles the technique of modifying VMAs limits
  *  @mal_lib_path: path of malicious library VMAs
  *  @benign_lib_path: path of benign library VMAs
@@ -468,10 +475,18 @@ void vma_modify_handler(char *mal_lib_path, char *benign_lib_path, int mode, int
          */
         for (int i = 0; i < sizeof(vma_rights) / sizeof(int); i++) {
             /* Find the pointer to VMA of the malicious library whose limits are to be modified and the benign library.*/
-            mal_vma = find_vma_path_rights(mal_lib_path, vma_rights[i], pid);
-            benign_vma = find_vma_path_rights(benign_lib_path, vma_rights[i], pid);
+            mal_vma = find_vma_path_rights(0, mal_lib_path, vma_rights[i], pid);
+            benign_vma = find_vma_path_rights(0, benign_lib_path, vma_rights[i], pid);
             if (mal_vma && benign_vma) {
-                tamper_vma_bounds(mal_vma, benign_vma, pid);
+                struct vm_area_struct *mal_start_vma = mal_vma;
+                struct vm_area_struct *ben_start_vma = benign_vma;
+                do {
+                    insert_ll_vma_backup(mal_vma->vm_file->f_path.dentry->d_name.name, mal_vma->vm_flags, mal_vma, mal_vma->vm_start, mal_vma->vm_end);
+                    tamper_vma_bounds(mal_vma, benign_vma, pid);
+                    mal_vma = find_vma_path_rights(mal_vma, mal_lib_path, vma_rights[i], pid);
+                    benign_vma = find_vma_path_rights(benign_vma, benign_lib_path, vma_rights[i], pid);
+                } while (mal_vma != mal_start_vma && mal_vma != 0 && benign_vma != ben_start_vma && benign_vma != 0);
+		
             } else {
                 log_print(LOG_ERR, "Failed to find malicious or benign VMA for limit modification.");
             }
@@ -480,16 +495,49 @@ void vma_modify_handler(char *mal_lib_path, char *benign_lib_path, int mode, int
         /* Reset the limits of the VMAs with the given path.
          * The VMAs are identified by their access rights.
          */
-        for (int i = 0; i < sizeof(vma_rights) / sizeof(int); ++i) {
-            /* Find the pointer to VMA of the malicious library whose limits are to be restored. */
-            mal_vma = find_vma_path_rights(mal_lib_path, vma_rights[i], pid);
-            if (mal_vma) {
-                reset_vma_bounds(mal_vma);
-            } else {
-                log_print(LOG_ERR, "Failed to find malicious VMA for limit reset.");
-            }
+
+        struct vma_backup_entry_ll *vma_back_ent = NULL;
+        list_for_each_entry(vma_back_ent, &vma_backup_ll, vma_bck_list) {
+            if (!vma_back_ent)
+                break;
+            struct vm_area_struct *ins_vma = vma_back_ent->vma;
+            ins_vma->vm_start = vma_back_ent->vm_start;
+            ins_vma->vm_end = vma_back_ent->vm_end;
         }
     } else {
         log_print(LOG_ERR, "Invalid mode");
+    }
+}
+
+
+/** mas_remapping_handler - Does the actual MAS remapping hiding/unhiding
+ *  @vm_start: vm_start of the vma to hide
+ *  @mode: hide or reveal
+ *  @pid: PID
+ *
+ *  Determines the malicious VMA whose limits are to be changed
+ *
+ */
+void mas_remapping_handler(unsigned long long vm_start, int pid, int mode){
+    if (mode == HIDE){
+        if (!mas_remap_mal_vma) {
+            mas_remap_mal_vma = kmalloc(sizeof(struct vma_backup_entry_ll), GFP_NOWAIT);
+            struct vm_area_struct *mal_vma = find_vma_with_start_address(vm_start, pid);
+            if (mal_vma) {
+                mas_remap_mal_vma->vma = mal_vma;
+                // Storing original start and end for unhiding.
+                mas_remap_mal_vma->vm_start = mal_vma->vm_start;
+                mas_remap_mal_vma->vm_end = mal_vma->vm_end;
+            }
+        }
+
+        if (mas_remap_mal_vma) {
+            mas_remap_mal_vma->vma->vm_end = mas_remap_mal_vma->vma->vm_start + 0x1000;
+            // The vma now contains only the first page.
+        }
+    } else {
+        if (!mas_remap_mal_vma)
+            return;
+        mas_remap_mal_vma->vma->vm_end = mas_remap_mal_vma->vm_end;
     }
 }
