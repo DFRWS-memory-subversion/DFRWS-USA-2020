@@ -41,6 +41,40 @@ win10_overlays = {
     }],
 }
 
+# Taken from volatility
+class _HANDLE_TABLE_WIN10(common._HANDLE_TABLE):
+
+    DECODE_MAGIC = 0x10
+
+    def get_item(self, entry, handle_value = 0):
+        """Returns the OBJECT_HEADER of the associated handle. The parent
+        is the _HANDLE_TABLE_ENTRY so that an object can be linked to its
+        GrantedAccess.
+        """
+
+        if entry.LowValue == 0:
+            return obj.NoneObject("LowValue pointer is invalid")
+
+        return self.obj_profile.Object("_OBJECT_HEADER",
+                          offset = self.decode_pointer(entry.LowValue),
+                          vm = self.obj_vm,
+                          parent = entry,
+                          handle_value = handle_value)
+
+
+    def decode_pointer(self, value):
+        """Decode a pointer like SAR. Since Python does not
+        have an operator for shift arithmetic, we implement
+        one ourselves.
+        """
+
+        value = value & 0xFFFFFFFFFFFFFFF8
+        value = value >> self.DECODE_MAGIC
+        if (value & 1 << 44):
+            return value | 0xFFFFF00000000000
+        else:
+            return value | 0xFFFF000000000000
+
 
 def InitializeWindows10Profile(profile):
     """Initialize windows 10 profiles."""
@@ -49,6 +83,9 @@ def InitializeWindows10Profile(profile):
 
     if profile.metadata("arch") == "AMD64":
         profile.add_overlay(win10_undocumented_amd64)
+        profile.add_classes(dict(
+            _HANDLE_TABLE=_HANDLE_TABLE_WIN10
+            ))
     else:
         profile.add_overlay(win10_undocumented_i386)
 

@@ -875,7 +875,8 @@ class KernelASMixin(object):
         super(KernelASMixin, self).__init__(*args, **kwargs)
 
         if self.plugin_args.kernel_slide is not None:
-            self.session.SetParameter("kernel_slide", kernel_slide)
+            self.session.SetParameter("kernel_slide",
+                                      self.plugin_args.kernel_slide)
 
         # If the dtb is specified use that as the kernel address space.
         if self.plugin_args.dtb is not None:

@@ -120,7 +120,10 @@ class LinVadDump(core.DirectoryDumperMixin, common.LinProcessFilter):
                 with renderer.open(directory=self.dump_dir,
                                    filename=filename,
                                    mode='wb') as fd:
-                    self.CopyToFile(task_space, vma.vm_start, vma.vm_end, fd)
+                    # We are subtracting 1 from vm_end as otherwise CopyToFile
+                    # will dump erroneously one additional page which is not
+                    # part of the vm_area_struct.
+                    self.CopyToFile(task_space, vma.vm_start, vma.vm_end - 1, fd)
 
 
 class TestLinVadDump(testlib.HashChecker):

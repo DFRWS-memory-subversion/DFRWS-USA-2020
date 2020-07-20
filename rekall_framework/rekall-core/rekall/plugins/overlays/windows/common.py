@@ -541,6 +541,13 @@ windows_overlay = {
         )]],
     }],
 
+    '_MMSUBSECTION_FLAGS': [None, {
+        "ProtectionEnum": lambda x: x.cast(
+            "Enumeration",
+            choices=MM_PROTECTION_ENUM,
+            value=x.m("Protection")),
+    }],
+
     '_SHARED_CACHE_MAP': [None, {
         'Vacbs': [None, ['Pointer', dict(
             target="Array",

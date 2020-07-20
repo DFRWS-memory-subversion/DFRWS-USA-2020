@@ -18,6 +18,14 @@
 #include <asm/alternative.h>
 #include <linux/mount.h>
 #include <linux/inetdevice.h>
+/* used for SYSTEM V shared memory */
+#include <linux/shm.h>
+#include <linux/ipc.h>
+/* SYSTEM V END */
+
+/* included for vm_area_struct's anon_vma and anon_vma_chain members */
+#include <linux/rmap.h>
+/* anon_vma END */
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,26)
 #include <linux/fdtable.h>
@@ -1186,4 +1194,54 @@ struct proc_dir_entry {
 #endif
 /****************************************
  * PROC END
+ ****************************************/
+
+
+/****************************************
+ * SYSTEM V shared memory
+ ****************************************/
+#if LINUX_VERSION_CODE > KERNEL_VERSION(4,16,0)
+struct shmid_kernel /* private to the kernel */
+{
+	struct kern_ipc_perm	shm_perm;
+	struct file		*shm_file;
+	unsigned long		shm_nattch;
+	unsigned long		shm_segsz;
+	time64_t		shm_atim;
+	time64_t		shm_dtim;
+	time64_t		shm_ctim;
+	struct pid		*shm_cprid;
+	struct pid		*shm_lprid;
+	struct user_struct	*mlock_user;
+
+	/* The task created the shm object.  NULL if the task is dead. */
+	struct task_struct	*shm_creator;
+	struct list_head	shm_clist;	/* list by creator */
+} __randomize_layout;
+
+/* shm_mode upper byte flags */
+#define SHM_DEST	01000	/* segment will be destroyed on last detach */
+#define SHM_LOCKED	02000   /* segment will not be swapped */
+
+struct shm_file_data {
+	int id;
+	struct ipc_namespace *ns;
+	struct file *file;
+	const struct vm_operations_struct *vm_ops;
+};
+#endif
+struct kern_ipc_perm kern_ipc_perm;
+struct shmid_kernel shmid_kernel;
+/****************************************
+ * SYSTEM V END
+ ****************************************/
+
+
+/****************************************
+ * anon_vma START
+ ****************************************/
+struct anon_vma anon_vma;
+struct anon_vma_chain anon_vma_chain;
+/****************************************
+ * anon_vma END
  ****************************************/

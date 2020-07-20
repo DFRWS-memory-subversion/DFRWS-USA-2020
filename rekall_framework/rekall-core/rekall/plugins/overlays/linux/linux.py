@@ -944,7 +944,7 @@ class page(obj.Struct):
             if self.obj_profile.get_constant("mem_section"):
                 # The VMEMMAP starts at this address in 64-bit kernels.
                 # arch/x86/include/asm/pgtable_64_types.h
-                mem_map = obj.Pointer.integer_to_address(0xffffea0000000000)
+                mem_map = self.obj_profile.get_constant_object("vmemmap_base", "Pointer")
             else:
                 self.obj_session.logging.error(
                     "Unable to determine physical address of page. NUMA is not "
@@ -974,6 +974,15 @@ class page(obj.Struct):
         if to_read <= size:
             data += b"\x00" * (size - to_read)
         return data
+
+    def get_mapping(self):
+        """Depending on the lowest bit, mapping either points to an
+        address_space or anon_vma instance."""
+
+        if self.u1.mapping.v() & 1:
+            return self.obj_profile.anon_vma(offset=self.u1.mapping.v() &~ 1)
+        else:
+            return self.u1.mapping
 
 
 class InodePermission(basic.Flags):
